@@ -173,6 +173,7 @@ integer :: id_vert_pvf  =-1
 integer :: id_bc_pvf    =-1
 integer :: id_pvf       =-1
 integer :: id_ri_balance=-1
+integer :: id_u_dot_grad_vert_pv   =-1
 logical :: diagnose_pv = .false.
 
 ! pressure conversion diagnostics written in energy analysis subroutine
@@ -431,6 +432,8 @@ id_pvf = register_diag_field ('ocean_model', 'pvf', Grd%tracer_axes(1:3), Time%m
   'Ertel PV times f', '1/sec^4', missing_value=missing_value, range=(/-1e6,1e6/))
 id_ri_balance = register_diag_field ('ocean_model', 'ri_balance', Grd%tracer_axes(1:3), Time%model_time,&
   'Balanced Richardson number', 'dimensionless', missing_value=missing_value, range=(/-1e6,1e6/))
+id_u_dot_grad_vert_pv = register_diag_field ('ocean_model', 'u_dot_grad_vert_pv', Grd%tracer_axes(1:3), Time%model_time,&
+'3d velocity dot product with 3d gradient of vertical piece of Ertel PV: u.grad((f+zeta)*N^2)', '1/sec^4', missing_value=missing_value, range=(/-1e6,1e6/))
 if (id_pg_pv > 0)      diagnose_pv = .true.
 if (id_vert_pv > 0)    diagnose_pv = .true.
 if (id_pg_pvf > 0)     diagnose_pv = .true.
@@ -438,6 +441,7 @@ if (id_vert_pvf > 0)   diagnose_pv = .true.
 if (id_bc_pvf > 0)     diagnose_pv = .true.
 if (id_pvf > 0)        diagnose_pv = .true.
 if (id_ri_balance > 0) diagnose_pv = .true.
+if (id_id_u_dot_grad_vert_pv > 0)    diagnose_pv = .true.
 
 
 if(horz_grid == MOM_BGRID) then 
@@ -1269,7 +1273,7 @@ subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
  
 
   ! contribution from absolute vorticity 
-  if(id_vert_pv > 0 .or. id_vert_pvf > 0 .or. id_pvf > 0) then
+  if(id_vert_pv > 0 .or. id_vert_pvf > 0 .or. id_pvf > 0 .or. id_u_dot_grad_vert_pv > 0) then
      do k=1,nk
         do j=jsc,jec
            do i=isc,iec
