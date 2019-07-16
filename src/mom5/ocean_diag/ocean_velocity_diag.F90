@@ -1291,7 +1291,29 @@ subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
      if(id_vert_pvf > 0) call diagnose_3d(Time, Grd, id_vert_pvf, wrk6(:,:,:))
   endif        
 
-  
+
+  ! calculate u dot grad vert_pv
+  ! by centred q differences multiplied by averaged velocity
+  ! NB: this method does not conserve q
+  ! BUG: UNFINISHED!
+  if(d_u_dot_grad_vert_pv > 0) then
+      do k=1,nk
+         do j=jsc,jec
+            do i=isc,iec
+                n=1 ! TODO: also do n=2 (j component)
+                    (wrk5(i+1,j,k) - wrk5(i-1,j,k))/
+                    (Grd%dxu(i+1,j)+Grd%dxu(i,j))
+                    *
+                *0.25*( Velocity%u(i,j,k,n,tau) + &
+                    Velocity%u(i-1,j,k,n,tau) + &
+                    Velocity%u(i,j-1,k,n,tau) + &
+                    Velocity%u(i-1,j-1,k,n,tau) )
+            enddo
+         enddo
+      enddo
+  endif
+
+
   ! contribution from baroclinicity and total contribution 
   if(id_bc_pvf > 0 .or. id_pvf > 0 .or. id_ri_balance > 0) then
      wrk1(:,:,:) = 0.0 
