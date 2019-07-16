@@ -84,7 +84,7 @@ use ocean_util_mod,            only: write_timestamp, matrix, diagnose_2d, diagn
 use ocean_util_mod,            only: write_chksum_3d, write_chksum_2d
 use ocean_velocity_advect_mod, only: horz_advection_of_velocity, vert_advection_of_velocity
 use ocean_vert_mix_mod,        only: vert_friction_bgrid, vert_friction_cgrid
-use ocean_workspace_mod,       only: wrk1, wrk2, wrk3, wrk4, wrk5, wrk6, wrk7
+use ocean_workspace_mod,       only: wrk1, wrk2, wrk3, wrk4, wrk5, wrk6
 use ocean_workspace_mod,       only: wrk1_v2d, wrk2_v2d  
 use ocean_workspace_mod,       only: wrk1_2d, wrk2_2d, wrk3_2d
 use ocean_workspace_mod,       only: wrk1_v, wrk2_v, wrk3_v
@@ -441,7 +441,7 @@ if (id_vert_pvf > 0)   diagnose_pv = .true.
 if (id_bc_pvf > 0)     diagnose_pv = .true.
 if (id_pvf > 0)        diagnose_pv = .true.
 if (id_ri_balance > 0) diagnose_pv = .true.
-if (id_id_u_dot_grad_vert_pv > 0)    diagnose_pv = .true.
+if (id_u_dot_grad_vert_pv > 0)    diagnose_pv = .true.
 
 
 if(horz_grid == MOM_BGRID) then 
@@ -1255,7 +1255,6 @@ subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
   wrk4(:,:,:)  = 0.0
   wrk5(:,:,:)  = 0.0
   wrk6(:,:,:)  = 0.0
-  wrk7(:,:,:)  = 0.0
 
 
   ! planetary geostrophic PV 
@@ -1291,21 +1290,6 @@ subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
      if(id_vert_pv  > 0) call diagnose_3d(Time, Grd, id_vert_pv,  wrk5(:,:,:))
      if(id_vert_pvf > 0) call diagnose_3d(Time, Grd, id_vert_pvf, wrk6(:,:,:))
   endif        
-
-  ! Calculate u dot grad vert_pv by Gauss' law (assumes 3d grad u = 0),
-  ! which should conserve q.
-  ! Method based on horz_advect_tracer_2nd_order and
-  ! vert_advect_tracer_2nd_order in ocean_tracer_advect.F90
-  ! NB: the individual components of q are advected by different methods,
-  ! so this isn't quite the same as how q is advected in the prognostic
-  ! equations.
-  ! BUG: UNFINISHED!
-  if(id_u_dot_grad_vert_pv > 0) then
-      ! horz_advect_tracer_2nd_order(Adv_vel, Tracer%field(:,:,:,tau))
-      wrk7 = horz_advect_tracer_2nd_order(Adv_vel, wrk5) &
-           + vert_advect_tracer_2nd_order(Adv_vel, wrk5)
-      call diagnose_3d(Time, Grd, id_u_dot_grad_vert_pv, wrk7(:,:,:))
-  endif
     
   ! contribution from baroclinicity and total contribution 
   if(id_bc_pvf > 0 .or. id_pvf > 0 .or. id_ri_balance > 0) then
@@ -1329,6 +1313,21 @@ subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
      if(id_ri_balance > 0) call diagnose_3d(Time, Grd, id_ri_balance, wrk4(:,:,:))
   endif 
 
+  
+  ! Calculate u dot grad vert_pv by Gauss' law (assumes 3d grad u = 0),
+  ! which should conserve q.
+  ! Method based on horz_advect_tracer_2nd_order and
+  ! vert_advect_tracer_2nd_order in ocean_tracer_advect.F90
+  ! NB: the individual components of q are advected by different methods,
+  ! so this isn't quite the same as how q is advected in the prognostic
+  ! equations.
+  ! BUG: UNFINISHED!
+  if(id_u_dot_grad_vert_pv > 0) then
+      ! horz_advect_tracer_2nd_order(Adv_vel, Tracer%field(:,:,:,tau))
+      wrk6 = horz_advect_tracer_2nd_order(Adv_vel, wrk5) &
+           + vert_advect_tracer_2nd_order(Adv_vel, wrk5)
+      call diagnose_3d(Time, Grd, id_u_dot_grad_vert_pv, wrk6(:,:,:))
+  endif
 
 end subroutine diagnose_potential_vorticity
 ! </SUBROUTINE> NAME="diagnose_potential_vorticity"
