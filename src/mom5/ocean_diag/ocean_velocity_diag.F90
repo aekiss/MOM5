@@ -88,6 +88,7 @@ use ocean_workspace_mod,       only: wrk1, wrk2, wrk3, wrk4, wrk5, wrk6
 use ocean_workspace_mod,       only: wrk1_v2d, wrk2_v2d  
 use ocean_workspace_mod,       only: wrk1_2d, wrk2_2d, wrk3_2d
 use ocean_workspace_mod,       only: wrk1_v, wrk2_v, wrk3_v
+use ocean_tracer_advect_mod,   only: horz_advect_tracer_2nd_order, vert_advect_tracer_2nd_order
 
 implicit none
 
@@ -568,13 +569,14 @@ end subroutine ocean_velocity_diag_init
 ! Call diagnostics related to the velocity. 
 ! </DESCRIPTION>
 !
-subroutine ocean_velocity_diagnostics(Time, Thickness, Dens, Ext_mode, Velocity)
+subroutine ocean_velocity_diagnostics(Time, Thickness, Dens, Ext_mode, Velocity, Adv_vel)
 
   type(ocean_time_type),          intent(in)    :: Time
   type(ocean_thickness_type),     intent(in)    :: Thickness
   type(ocean_density_type),       intent(in)    :: Dens
   type(ocean_external_mode_type), intent(in)    :: Ext_mode
   type(ocean_velocity_type),      intent(inout) :: Velocity
+  type(ocean_adv_vel_type),       intent(in)    :: Adv_vel
 
   type(time_type) :: next_time 
 
@@ -622,7 +624,7 @@ subroutine ocean_velocity_diagnostics(Time, Thickness, Dens, Ext_mode, Velocity)
   call diagnose_kinetic_energy_maps(Time, Thickness, Velocity, Ext_mode)
 
   ! diagnostic potential vorticity and terms 
-  call diagnose_potential_vorticity(Time, Velocity, Dens)
+  call diagnose_potential_vorticity(Time, Velocity, Dens, Adv_vel)
   
 end subroutine ocean_velocity_diagnostics
 ! </SUBROUTINE>  NAME="ocean_velocity_diagnostics"
@@ -1234,11 +1236,12 @@ end subroutine compute_vorticity
 !
 ! </DESCRIPTION>
 !
-subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
+subroutine diagnose_potential_vorticity(Time, Velocity, Dens, Adv_vel)
 
   type(ocean_time_type),      intent(in)  :: Time
   type(ocean_velocity_type),  intent(in)  :: Velocity
   type(ocean_density_type),   intent(in)  :: Dens
+  type(ocean_adv_vel_type),   intent(in)  :: Adv_vel
 
   real    :: grav_rho0r_sq 
   integer :: i, j, k

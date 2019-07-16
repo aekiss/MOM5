@@ -416,7 +416,7 @@ real, dimension(:,:,:), allocatable :: global_tmask_jp1
 
 public  horz_advect_tracer
 private horz_advect_tracer_upwind
-private horz_advect_tracer_2nd_order
+public  horz_advect_tracer_2nd_order
 private horz_advect_tracer_4th_order
 private horz_advect_tracer_6th_order
 private horz_advect_tracer_quicker
@@ -424,7 +424,7 @@ private horz_advect_tracer_quickmom3
 
 public  vert_advect_tracer
 private vert_advect_tracer_upwind
-private vert_advect_tracer_2nd_order
+public  vert_advect_tracer_2nd_order
 private vert_advect_tracer_4th_order
 private vert_advect_tracer_6th_order
 private vert_advect_tracer_quicker
