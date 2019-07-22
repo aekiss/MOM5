@@ -87,6 +87,7 @@ program main
   use fms_io_mod,               only: fms_io_exit
   use mpp_domains_mod,          only: domain2d, mpp_get_compute_domain
   use mpp_io_mod,               only: mpp_open, MPP_RDONLY, MPP_ASCII, MPP_OVERWR, MPP_APPEND, mpp_close, MPP_SINGLE
+  use mpp_mod,                  only: mpp_init
   use mpp_mod,                  only: mpp_error, FATAL, NOTE, mpp_pe, mpp_npes, mpp_set_current_pelist, mpp_sync
   use mpp_mod,                  only: stdlog, stdout, mpp_root_pe, mpp_clock_id
   use mpp_mod,                  only: mpp_clock_begin, mpp_clock_end, MPP_CLOCK_SYNC
@@ -94,7 +95,7 @@ program main
   use mpp_mod,                  only: mpp_broadcast
   use time_interp_external_mod, only: time_interp_external_init
   use time_manager_mod,         only: set_calendar_type, time_type, increment_date
-  use time_manager_mod,         only: set_time, set_date, get_time, get_date, month_name
+  use time_manager_mod,         only: set_time, set_date, get_time, get_date, month_name, print_time
   use time_manager_mod,         only: GREGORIAN, JULIAN, NOLEAP, THIRTY_DAY_MONTHS, NO_CALENDAR
   use time_manager_mod,         only: operator( <= ), operator( < ), operator( >= )
   use time_manager_mod,         only: operator( + ),  operator( - ), operator( / )
@@ -106,10 +107,9 @@ program main
   use ocean_types_mod,          only: ice_ocean_boundary_type
   use ocean_util_mod,           only: write_chksum_2d
 
-#ifdef ACCESS
   use auscom_ice_parameters_mod, only: redsea_gulfbay_sfix, do_sfix_now, sfix_hours, int_sec
   use accessom2_mod, only : accessom2_type => accessom2
-#endif
+  use coupler_mod, only : coupler_type => coupler
 
   implicit none
 
@@ -117,6 +117,7 @@ program main
   type (ocean_state_type),       pointer :: Ocean_state
   type(ice_ocean_boundary_type), target  :: Ice_ocean_boundary
   type(accessom2_type) :: accessom2
+  type(coupler_type) :: coupler
 
   ! define some time types
   type(time_type) :: Time_init    ! initial time for experiment
@@ -128,10 +129,9 @@ program main
   type(time_type) :: Time_restart_init
   type(time_type) :: Time_restart
   type(time_type) :: Time_restart_current
-#ifdef ACCESS
   type(time_type) :: Time_last_sfix 
   type(time_type) :: Time_sfix 
-#endif
+  integer :: sfix_seconds
 
   character(len=17) :: calendar = 'julian'
 
@@ -148,7 +148,9 @@ program main
   integer :: isc,iec,jsc,jec
   integer :: unit, io_status, ierr
 
-  integer :: flags=0, override_clock, coupler_init_clock
+  integer :: flags=0
+  integer :: init_clock, main_clock, term_clock
+  integer :: override_clock, coupler_init_clock
   integer :: nfields 
   
   character(len=256) :: version = ''
@@ -164,9 +166,8 @@ program main
   integer, parameter :: mp = 2*MAXPES
   data ((mask_list(n,m),n=1, 2),m=1,MAXPES) /mp*0/
   integer :: restart_interval(6) = (/0,0,0,0,0,0/)
-  integer :: mpi_comm_mom, atm_intercomm
+  integer :: mpi_comm_mom
   integer ::  stdoutunit, stdlogunit, tmp_unit
-  logical :: external_initialization
   logical :: debug_this_module
   character(len=1024) :: accessom2_config_dir = '../'
   integer, dimension(6) :: date_array
@@ -182,14 +183,15 @@ program main
   read(tmp_unit, nml=ocean_solo_nml)
   close(tmp_unit)
 
-  call external_coupler_mpi_init(mpi_comm_mom, external_initialization, &
-                                 trim(accessom2_config_dir), atm_intercomm)
+  call coupler%init_begin('mom5xx', config_dir=trim(accessom2_config_dir))
 
-  if ( external_initialization ) then
-     call fms_init(mpi_comm_mom)
-  else
-     call fms_init()
-  endif
+  call mpp_init(localcomm=coupler%localcomm)
+  init_clock = mpp_clock_id('Initialization')
+  main_clock = mpp_clock_id('Main Loop')
+  term_clock = mpp_clock_id('Termination')
+  call mpp_clock_begin(init_clock)
+
+  call fms_init(coupler%localcomm)
 
   call constants_init()
   flags = MPP_CLOCK_SYNC
@@ -226,10 +228,14 @@ program main
   ! Initialise libaccessom2
   call accessom2%init('mom5xx', config_dir=trim(accessom2_config_dir))
 
+  if (mpp_pe() == mpp_root_pe()) then
+    call accessom2%print_version_info()
+  endif
+
   ! Tell libaccessom2 about any global configs/state
 
   ! Synchronise accessom2 'state' (i.e. configuration) between all models.
-  call accessom2%sync_config(atm_intercomm, -1, -1)
+  call accessom2%sync_config(coupler)
 
   ! Use accessom2 configuration to set calendar
   if (index(accessom2%get_calendar_type(), 'noleap') > 0) then
@@ -296,10 +302,6 @@ program main
   Time_step_coupled = set_time(dt_cpld, 0)
   num_cpld_calls    = Run_len / Time_step_coupled
   Time = Time_start
-#ifdef ACCESS
-  Time_last_sfix = Time_start
-  Time_sfix = set_time(seconds=int(sfix_hours*SECONDS_PER_HOUR))
-#endif
 
   Time_restart_init = set_date(date_restart(1), date_restart(2), date_restart(3),  &
                                date_restart(4), date_restart(5), date_restart(6) )
@@ -356,6 +358,31 @@ program main
   call ocean_model_init(Ocean_sfc, Ocean_state, Time_init, Time, &
                         accessom2%get_ice_ocean_timestep())
 
+  if (redsea_gulfbay_sfix) then
+    ! This must be called after ocean_model_init so sfix_hours is read in from namelist
+    sfix_seconds = sfix_hours * SECONDS_PER_HOUR
+    ! Get current model time from Time_init in seconds (must be done like this otherwise
+    ! can get an overflow in seconds)
+    call get_time(Time-Time_init,seconds=seconds,days=days)
+    ! The last sfix time has to be determined from absolute model time, to ensure reproducibility 
+    ! across restarts
+
+    ! Current time to nearest hour
+    hours = days*24 + int(seconds/SECONDS_PER_HOUR)
+
+    ! Time of last sfix 
+    hours = int(hours / sfix_hours) * sfix_hours
+
+    ! Convert to days + hours
+    days = int(hours / 24)
+    hours = hours - days*24
+
+    Time_last_sfix = set_time(days=int(days),seconds=int(hours*SECONDS_PER_HOUR)) + Time_init
+    Time_sfix = set_time(seconds=int(sfix_seconds))
+
+    call print_time(Time_last_sfix,'Time_last_sfix: ')
+  end if
+
   call data_override_init(Ocean_domain_in = Ocean_sfc%domain)
 
   override_clock = mpp_clock_id('Override', flags=flags,grain=CLOCK_COMPONENT)
@@ -380,11 +407,8 @@ program main
              Ice_ocean_boundary% aice(isc:iec,jsc:jec),             &
              Ice_ocean_boundary% mh_flux(isc:iec,jsc:jec),          &
              Ice_ocean_boundary% wfimelt(isc:iec,jsc:jec),          &
-             Ice_ocean_boundary% wfiform(isc:iec,jsc:jec))
-#if defined ACCESS_CM
-    allocate(Ice_ocean_boundary%co2(isc:iec,jsc:jec),               &
+             Ice_ocean_boundary% wfiform(isc:iec,jsc:jec),          &
              Ice_ocean_boundary%wnd(isc:iec,jsc:jec))
-#endif
 
   Ice_ocean_boundary%u_flux          = 0.0
   Ice_ocean_boundary%v_flux          = 0.0
@@ -405,37 +429,37 @@ program main
   Ice_ocean_boundary%mh_flux         = 0.0
   Ice_ocean_boundary% wfimelt        = 0.0
   Ice_ocean_boundary% wfiform        = 0.0
-#if defined ACCESS_CM
-  Ice_ocean_boundary%co2             = 0.0
   Ice_ocean_boundary%wnd             = 0.0
-#endif
 
   coupler_init_clock = mpp_clock_id('OASIS init', grain=CLOCK_COMPONENT)
   call mpp_clock_begin(coupler_init_clock)
   call external_coupler_sbc_init(Ocean_sfc%domain, dt_cpld, Run_len, &
                                  accessom2%get_coupling_field_timesteps())
   call mpp_clock_end(coupler_init_clock)
+  call mpp_clock_end(init_clock)
 
   ! loop over the coupled calls
+  call mpp_clock_begin(main_clock)
   do nc=1, num_cpld_calls
+
+     call external_coupler_sbc_before(Ice_ocean_boundary, Ocean_sfc, nc, dt_cpld)
+
      call mpp_clock_begin(override_clock)
      call ice_ocn_bnd_from_data(Ice_ocean_boundary)
      call mpp_clock_end(override_clock)
-
-     call external_coupler_sbc_before(Ice_ocean_boundary, Ocean_sfc, nc, dt_cpld)
 
      if (debug_this_module) then
         call write_boundary_chksums(Ice_ocean_boundary)
      endif
 
-#ifdef ACCESS
-     if ((Time - Time_last_sfix) >= Time_sfix) then
-        do_sfix_now = .true.
-        Time_last_sfix = Time
-     else
-        do_sfix_now = .false.
-     end if
-#endif
+    if (redsea_gulfbay_sfix) then
+        if ((Time - Time_last_sfix) >= Time_sfix) then
+            do_sfix_now = .true.
+            Time_last_sfix = Time
+        else
+            do_sfix_now = .false.
+        end if
+    end if
 
      call update_ocean_model(Ice_ocean_boundary, Ocean_state, Ocean_sfc, Time, Time_step_coupled)
 
@@ -458,6 +482,9 @@ program main
      call external_coupler_sbc_after(Ice_ocean_boundary, Ocean_sfc, nc, dt_cpld )
 
   enddo
+  call mpp_clock_end(main_clock)
+
+  call mpp_clock_begin(term_clock)
 
   call external_coupler_restart( dt_cpld, num_cpld_calls, Ocean_sfc)
 
@@ -474,17 +501,18 @@ program main
 
   call fms_io_exit
 
-  call external_coupler_exit
-
-  call fms_end
-
+  call coupler%deinit()
   ! Allow libaccessom2 to check that all models are synchronised at the end of
   ! the run.
   call get_date(Time, date_array(1), date_array(2), date_array(3), &
                 date_array(4), date_array(5), date_array(6))
   call accessom2%deinit(cur_date_array=date_array)
 
-  call external_coupler_mpi_exit(mpi_comm_mom, external_initialization)
+  call mpp_clock_end(term_clock)
+
+  call fms_end
+
+  call external_coupler_mpi_exit(coupler%localcomm, .true.)
 
   print *, 'MOM5: --- completed ---'
 
@@ -569,28 +597,7 @@ end subroutine ice_ocn_bnd_from_data
 ! For clarity all variables should be passed as arguments rather than as globals.
 ! This may require changes to the argument lists.
 
-subroutine external_coupler_mpi_init(mom_local_communicator, &
-                                     external_initialization, &
-                                     accessom2_config_dir, &
-                                     atm_intercomm)
-    ! OASIS3/PRISM acts as the master and initializes MPI. Get a local communicator.
-    ! need to initialize prism and get local communicator MPI_COMM_MOM first! 
-
-    use mom_oasis3_interface_mod, only : mom_prism_init
-    implicit none
-    integer, intent(out) :: mom_local_communicator
-    logical, intent(out) :: external_initialization
-    character(len=*), intent(in) :: accessom2_config_dir
-    integer, optional, intent(out) :: atm_intercomm
-    mom_local_communicator = -100         ! Is there mpp_undefined parameter corresponding to MPI_UNDEFINED?
-                                          ! probably wouldn't need logical flag.
-    if (present(atm_intercomm)) then
-        call mom_prism_init(mom_local_communicator, accessom2_config_dir, atm_intercomm)
-    else
-        call mom_prism_init(mom_local_communicator, accessom2_config_dir)
-    endif
-    external_initialization = .true.
-end subroutine external_coupler_mpi_init
+! NOTE: libaccessom2 makes most of these functions redundant.
 
 subroutine external_coupler_sbc_init(Dom, dt_cpld, Run_len, &
                                      coupling_field_timesteps)
@@ -655,12 +662,6 @@ subroutine external_coupler_restart( dt_cpld, num_cpld_calls, Ocean_sfc)
     call write_coupler_restart(timestep, Ocean_sfc, write_restart=.true.)
 end subroutine external_coupler_restart
 
-subroutine external_coupler_exit
-    ! Clean up as appropriate. Final call to external program
-    use mom_oasis3_interface_mod, only : mom_prism_terminate
-    call mom_prism_terminate
-end subroutine external_coupler_exit
-
 subroutine external_coupler_mpi_exit(mom_local_communicator, external_initialization)
     ! mpp_exit wont call MPI_FINALIZE if mom_local_communicator /= MPI_COMM_WORLD
     implicit none
@@ -694,10 +695,7 @@ subroutine write_boundary_chksums(Ice_ocean_boundary)
     call write_chksum_2d('Ice_ocean_boundary%mh_flux', Ice_ocean_boundary%mh_flux)
     call write_chksum_2d('Ice_ocean_boundary%wfimelt', Ice_ocean_boundary%wfimelt)
     call write_chksum_2d('Ice_ocean_boundary%wfiform', Ice_ocean_boundary%wfiform)
-#if defined ACCESS_CM
-    call write_chksum_2d('Ice_ocean_boundary%co2', Ice_ocean_boundary%co2)
     call write_chksum_2d('Ice_ocean_boundary%wnd', Ice_ocean_boundary%wnd)
-#endif
 
 end subroutine write_boundary_chksums
 

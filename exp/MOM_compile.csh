@@ -7,9 +7,17 @@ set type          = MOM_solo    # Type of the experiment
 set unit_testing = 0
 set help = 0
 set debug = 0
+set repro = 0
 set use_netcdf4 = 0
+set environ = 1
 
-set argv = (`getopt -u -o h -l type: -l platform: -l help -l unit_testing -l debug -l use_netcdf4 --  $*`)
+
+set argv = (`getopt -u -o h -l type: -l platform: -l help -l unit_testing -l debug -l repro -l use_netcdf4 -l no_environ --  $*`)
+if ($status != 0) then
+  # Die if there are incorrect options
+  set help = 1
+  goto help
+endif
 while ("$argv[1]" != "--")
     switch ($argv[1])
         case --type:
@@ -20,8 +28,12 @@ while ("$argv[1]" != "--")
                 set unit_testing = 1; breaksw
         case --debug:
                 set debug = 1; breaksw
+        case --repro:
+                set repro = 1; breaksw
         case --use_netcdf4:
                 set use_netcdf4 = 1; breaksw
+        case --no_environ:
+                set environ = 0; breaksw
         case --help:
                 set help = 1;  breaksw
         case -h:
@@ -30,6 +42,7 @@ while ("$argv[1]" != "--")
     shift argv
 end
 shift argv
+help:
 if ( $help ) then
     echo "The optional arguments are:"
     echo "--type       followed by the type of the model, one of the following (default is MOM_solo):"
@@ -45,6 +58,8 @@ if ( $help ) then
     echo "--platform   followed by the platform name that has a corresponding environs file in the ../bin dir, default is gfortran"
     echo
     echo "--use_netcdf4  use NetCDF4, the default is NetCDF4. Warning: many of the standard experiments don't work with NetCDF4."
+    echo
+    echo "--no_environ  do not source platform specific environment. Allows customising/overriding default environment"
     echo
     exit 1
 endif
@@ -71,7 +86,7 @@ endif
 if ( $type == EBM ) then
     set cppDefs  = ( "-Duse_netCDF -Duse_netCDF3 -Duse_libMPI -DLAND_BND_TRACERS -DOVERLOAD_C8 -DOVERLOAD_C4 -DOVERLOAD_R4" )
 else if( $type == ACCESS-OM ) then
-    set cppDefs  = ( "-Duse_netCDF -Duse_libMPI -DACCESS" )
+    set cppDefs  = ( "-Duse_netCDF -Duse_libMPI -DACCESS -DACCESS_OM" )
 else if( $type == ACCESS-CM ) then
     set cppDefs  = ( "-Duse_netCDF -Duse_libMPI -DACCESS -DACCESS_CM" )
 endif
@@ -85,6 +100,10 @@ if ( $debug ) then
     setenv DEBUG true
 endif
 
+if ( $repro ) then
+    setenv REPRO true
+endif
+
 if ( $use_netcdf4 ) then
     set cppDefs = `echo $cppDefs | sed -e 's/-Duse_netCDF3//g'`
     set cppDefs = "$cppDefs -Duse_netCDF4"
@@ -93,7 +112,9 @@ endif
 #
 # Users must ensure the correct environment file exists for their platform.
 #
-source $root/bin/environs.$platform  # environment variables and loadable modules
+if ( $environ ) then
+  source $root/bin/environs.$platform  # environment variables and loadable modules
+endif
 
 #
 # compile mppnccombine.c, needed only if $npes > 1

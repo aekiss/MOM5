@@ -140,7 +140,7 @@ program main
   use mpp_mod,                  only: MPP_CLOCK_DETAILED, CLOCK_COMPONENT, MAXPES
   use time_interp_external_mod, only: time_interp_external_init
   use time_manager_mod,         only: set_calendar_type, time_type, increment_date
-  use time_manager_mod,         only: set_time, set_date, get_time, get_date, month_name
+  use time_manager_mod,         only: set_time, set_date, get_time, get_date, month_name, print_time
   use time_manager_mod,         only: GREGORIAN, JULIAN, NOLEAP, THIRTY_DAY_MONTHS, NO_CALENDAR
   use time_manager_mod,         only: operator( <= ), operator( < ), operator( >= )
   use time_manager_mod,         only: operator( + ),  operator( - ), operator( / )
@@ -152,9 +152,7 @@ program main
   use ocean_types_mod,          only: ice_ocean_boundary_type
   use ocean_util_mod,           only: write_chksum_2d
 
-#ifdef ACCESS
   use auscom_ice_parameters_mod, only: redsea_gulfbay_sfix, do_sfix_now, sfix_hours, int_sec
-#endif
 
   implicit none
 
@@ -172,10 +170,9 @@ program main
   type(time_type) :: Time_restart_init
   type(time_type) :: Time_restart
   type(time_type) :: Time_restart_current
-#ifdef ACCESS
   type(time_type) :: Time_last_sfix 
   type(time_type) :: Time_sfix 
-#endif
+  integer :: sfix_seconds
 
   character(len=17) :: calendar = 'julian'
 
@@ -310,10 +307,6 @@ program main
   Time_step_coupled = set_time(dt_cpld, 0)
   num_cpld_calls    = Run_len / Time_step_coupled
   Time = Time_start
-#ifdef ACCESS
-  Time_last_sfix = Time_start
-  Time_sfix = set_time(seconds=int(sfix_hours*SECONDS_PER_HOUR))
-#endif
 
   Time_restart_init = set_date(date_restart(1), date_restart(2), date_restart(3),  &
                                date_restart(4), date_restart(5), date_restart(6) )
@@ -369,6 +362,32 @@ program main
 
   call ocean_model_init(Ocean_sfc, Ocean_state, Time_init, Time)
 
+  if (redsea_gulfbay_sfix) then
+    ! This must be called after ocean_model_init so sfix_hours is read in from namelist
+    sfix_seconds = sfix_hours * SECONDS_PER_HOUR
+    ! Get current model time from Time_init in seconds (must be done like this otherwise
+    ! can get an overflow in seconds)
+    call get_time(Time-Time_init,seconds=seconds,days=days)
+    ! The last sfix time has to be determined from absolute model time, to ensure reproducibility 
+    ! across restarts
+
+    ! Current time to nearest hour
+    hours = days*24 + int(seconds/SECONDS_PER_HOUR)
+
+    ! Time of last sfix 
+    hours = int(hours / sfix_hours) * sfix_hours
+
+    ! Convert to days + hours
+    days = int(hours / 24)
+    hours = hours - days*24
+
+    Time_last_sfix = set_time(days=int(days),seconds=int(hours*SECONDS_PER_HOUR)) + Time_init
+
+    Time_sfix = set_time(seconds=int(sfix_seconds))
+
+    call print_time(Time_last_sfix,'Time_last_sfix: ')
+  end if
+
   call data_override_init(Ocean_domain_in = Ocean_sfc%domain)
 
   override_clock = mpp_clock_id('Override', flags=flags,grain=CLOCK_COMPONENT)
@@ -394,10 +413,10 @@ program main
              Ice_ocean_boundary% mh_flux(isc:iec,jsc:jec),          &
              Ice_ocean_boundary% wfimelt(isc:iec,jsc:jec),          &
              Ice_ocean_boundary% wfiform(isc:iec,jsc:jec))
-#if defined ACCESS_CM
-    allocate(Ice_ocean_boundary%co2(isc:iec,jsc:jec),               &
-             Ice_ocean_boundary%wnd(isc:iec,jsc:jec))
-#endif
+  allocate ( Ice_ocean_boundary%co2(isc:iec,jsc:jec),               &
+             Ice_ocean_boundary%wnd(isc:iec,jsc:jec),               &
+             Ice_ocean_boundary%licefw(isc:iec,jsc:jec),            &
+             Ice_ocean_boundary%liceht(isc:iec,jsc:jec))
 
   Ice_ocean_boundary%u_flux          = 0.0
   Ice_ocean_boundary%v_flux          = 0.0
@@ -418,10 +437,10 @@ program main
   Ice_ocean_boundary%mh_flux         = 0.0
   Ice_ocean_boundary% wfimelt        = 0.0
   Ice_ocean_boundary% wfiform        = 0.0
-#if defined ACCESS_CM
   Ice_ocean_boundary%co2             = 0.0
   Ice_ocean_boundary%wnd             = 0.0
-#endif
+  Ice_ocean_boundary%licefw          = 0.0
+  Ice_ocean_boundary%liceht          = 0.0
 
   coupler_init_clock = mpp_clock_id('OASIS init', grain=CLOCK_COMPONENT)
   call mpp_clock_begin(coupler_init_clock)
@@ -430,24 +449,25 @@ program main
 
   ! loop over the coupled calls
   do nc=1, num_cpld_calls
+
+     call external_coupler_sbc_before(Ice_ocean_boundary, Ocean_sfc, nc, dt_cpld )
+
      call mpp_clock_begin(override_clock)
      call ice_ocn_bnd_from_data(Ice_ocean_boundary)
      call mpp_clock_end(override_clock)
-
-     call external_coupler_sbc_before(Ice_ocean_boundary, Ocean_sfc, nc, dt_cpld )
 
      if (debug_this_module) then
         call write_boundary_chksums(Ice_ocean_boundary)
      endif
 
-#ifdef ACCESS
-     if ((Time - Time_last_sfix) >= Time_sfix) then
-        do_sfix_now = .true.
-        Time_last_sfix = Time
-     else
-        do_sfix_now = .false.
-     end if
-#endif
+     if (redsea_gulfbay_sfix) then
+        if ((Time - Time_last_sfix) >= Time_sfix) then
+            do_sfix_now = .true.
+            Time_last_sfix = Time
+        else
+            do_sfix_now = .false.
+        end if
+    end if
 
      call update_ocean_model(Ice_ocean_boundary, Ocean_state, Ocean_sfc, Time, Time_step_coupled)
 
@@ -489,7 +509,7 @@ program main
 
   call external_coupler_mpi_exit(mpi_comm_mom, external_initialization)
 
-  print *, 'MOM4: --- completed ---'
+  print *, 'MOM5: --- completed ---'
 
   contains
 
@@ -684,10 +704,8 @@ subroutine write_boundary_chksums(Ice_ocean_boundary)
     call write_chksum_2d('Ice_ocean_boundary%mh_flux', Ice_ocean_boundary%mh_flux)
     call write_chksum_2d('Ice_ocean_boundary%wfimelt', Ice_ocean_boundary%wfimelt)
     call write_chksum_2d('Ice_ocean_boundary%wfiform', Ice_ocean_boundary%wfiform)
-#if defined ACCESS_CM
     call write_chksum_2d('Ice_ocean_boundary%co2', Ice_ocean_boundary%co2)
     call write_chksum_2d('Ice_ocean_boundary%wnd', Ice_ocean_boundary%wnd)
-#endif
 
 end subroutine write_boundary_chksums
 

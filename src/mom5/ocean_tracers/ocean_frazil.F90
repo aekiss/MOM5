@@ -128,10 +128,11 @@ use ocean_types_mod,      only: ocean_prog_tracer_type, ocean_diag_tracer_type, 
 use ocean_workspace_mod,  only: wrk1_2d, wrk1
 use ocean_util_mod,       only: diagnose_2d, diagnose_3d
 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
 use auscom_ice_parameters_mod, only: pop_icediag, do_ice
 use auscom_ice_mod,            only: AQICE
 use auscom_ice_mod,            only: auscom_ice_formation_new
+use auscom_ice_mod,            only: auscom_ice_formation_new_redist
 use diag_manager_mod,          only: send_data
 #endif
 
@@ -165,6 +166,7 @@ real    :: cp_ocean_r
 logical :: used
 integer :: id_frazil_2d=-1
 integer :: id_frazil_3d=-1
+integer :: id_frazil_3d_int_z=-1
 integer :: id_temp_freeze=-1
 ! for FAFMIP heat tracers 
 integer :: id_frazil_redist_2d=-1
@@ -471,13 +473,16 @@ subroutine ocean_frazil_init (Domain, Grid, Time, Time_steps, Ocean_options, &
 
   ! when ice forms only in k=1 cell, only require frazil saved as 2d field 
   id_frazil_2d = register_diag_field ('ocean_model', 'frazil_2d', Grd%tracer_axes(1:2), &
-         Time%model_time, 'ocn frazil heat flux over time step', 'W/m^2',               &
+         Time%model_time, 'ocn frazil heat flux from the top level over time step', 'W/m^2', &
          missing_value=missing_value, range=(/-1.e10,1.e10/))  
 
   ! when ice forms at any depth, require frazil to be saved as 3d field
   id_frazil_3d = register_diag_field ('ocean_model', 'frazil_3d', Grd%tracer_axes(1:3), &
          Time%model_time, 'ocn frazil heat flux over time step', 'W/m^2',               &
          missing_value=missing_value, range=(/-1.e10,1.e10/))  
+  id_frazil_3d_int_z = register_diag_field ('ocean_model', 'frazil_3d_int_z', Grd%tracer_axes(1:2), &
+         Time%model_time, 'Vertical sum of ocn frazil heat flux over time step', 'W/m^2', &
+         missing_value=missing_value, range=(/-1.e10,1.e10/))
 
   ! for FAFMIP frazil diagnostic tracer 
   id_frazil_redist_2d = register_diag_field ('ocean_model','frazil_redist_2d',Grd%tracer_axes(1:2), &
@@ -525,8 +530,14 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
 
   if(.not. use_this_module) return 
 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
   if (pop_icediag) then
+!In FAFMIP runs we need to call this routine first as it is possibe to change
+!the salinity.
+    if(index_frazil_redist > 0) then
+     call compute_frazil_redist_heating(Time, Thickness, Dens, T_prog, T_diag)
+    endif 
+
     if ( do_ice ) then
       T_diag(index_frazil)%field = 0.0
       call auscom_ice_formation_new(Time,T_prog,Thickness, T_diag(index_frazil) )
@@ -542,7 +553,17 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
            Time%model_time, rmask=Grd%tmask(:,:,:), &
            is_in=isc, js_in=jsc, ks_in=1, ie_in=iec, je_in=jec, ke_in=nk)
     endif
-  
+
+    if (id_frazil_3d_int_z > 0) then
+       wrk1_2d(:,:) = 0.0
+       do k=1,nk
+          wrk1_2d(:,:) = wrk1_2d(:,:) +  T_diag(index_frazil)%field(:,:,k)*dtimer
+       enddo
+       used = send_data(id_frazil_3d_int_z, wrk1_2d(:,:), &
+            Time%model_time, rmask=Grd%tmask(:,:,1), &
+            is_in=isc, js_in=jsc, ie_in=iec, je_in=jec)
+    endif
+
     return
   endif
 #endif
@@ -565,7 +586,7 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
                     T_prog(index_temp)%field(i,j,k,taup1) = tfreeze
                 endif
             endif
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
             AQICE(i,j)=AQICE(i,j) - T_diag(index_frazil)%field(i,j,k)
             !'-' is required in routine ice_heatflux for merge operation.
 #endif
@@ -592,7 +613,7 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
                         T_prog(index_temp)%field(i,j,k,taup1) = tfreeze
                     endif
                 endif
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
                 AQICE(i,j)=AQICE(i,j) - T_diag(index_frazil)%field(i,j,1)
                 !'-' is required in routine ice_heatflux for merge operation.
 #endif
@@ -600,7 +621,7 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
           enddo
 
       else 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
        do j=jsc,jec
              do i=isc,iec
                 do k=1,nk
@@ -624,7 +645,7 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
                            T_prog(index_temp)%field(i,j,k,taup1) = tfreeze
                        endif
                    endif
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
                    AQICE(i,j)=AQICE(i,j) - T_diag(index_frazil)%field(i,j,k)
                    !'-' is required in routine ice_heatflux for merge operation.
 #endif
@@ -693,6 +714,13 @@ subroutine compute_frazil_heating (Time, Thickness, Dens, T_prog, T_diag)
   endif
   if (id_frazil_3d > 0) then
      call diagnose_3d(Time, Grd, id_frazil_3d, T_diag(index_frazil)%field(:,:,:)*dtimer)
+  endif
+  if (id_frazil_3d_int_z > 0) then
+     wrk1_2d(:,:) = 0.0
+     do k=1,nk
+        wrk1_2d(:,:) = wrk1_2d(:,:) +  T_diag(index_frazil)%field(:,:,k)*dtimer
+     enddo
+     call diagnose_2d(Time, Grd, id_frazil_3d_int_z, wrk1_2d(:,:))
   endif
 
   if(id_temp_freeze > 0) then 
@@ -765,6 +793,29 @@ subroutine compute_frazil_redist_heating (Time, Thickness, Dens, T_prog, T_diag)
 
   if(.not. use_this_module) return 
 
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
+  if (pop_icediag) then
+    if ( do_ice ) then
+      T_diag(index_frazil_redist)%field = 0.0
+!Saliniy is unchanged on return from this routine. 
+      call auscom_ice_formation_new_redist(Time,T_prog,Thickness, T_diag(index_frazil_redist) )
+    endif
+    T_diag(index_frazil_redist)%field=T_diag(index_frazil_redist)%field * Grd%tmask
+    if (id_frazil_redist_2d > 0) then 
+      used = send_data(id_frazil_redist_2d, T_diag(index_frazil_redist)%field(:,:,1)*dtimer, &
+           Time%model_time, rmask=Grd%tmask(:,:,1), &
+           is_in=isc, js_in=jsc, ie_in=iec, je_in=jec)
+    endif
+    if (id_frazil_redist_3d > 0) then 
+      used = send_data(id_frazil_redist_3d, T_diag(index_frazil_redist)%field(:,:,:)*dtimer, &
+           Time%model_time, rmask=Grd%tmask(:,:,:), &
+           is_in=isc, js_in=jsc, ks_in=1, ie_in=iec, je_in=jec, ke_in=nk)
+    endif
+  
+    return
+  endif
+#endif
+
   taup1 = Time%taup1
   tau   = Time%tau
 
@@ -810,7 +861,7 @@ subroutine compute_frazil_redist_heating (Time, Thickness, Dens, T_prog, T_diag)
           enddo
 
       else 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
        do j=jsc,jec
              do i=isc,iec
                 do k=1,nk

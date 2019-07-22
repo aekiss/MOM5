@@ -37,7 +37,21 @@ module ocean_sbc_mod
 ! on the B-grid point.  Code will need to be modified if using another
 ! assumption.  
 !
+! Treatment of flux adjustments may be modified according to the FAFMIP
+! experiment protocol (Gregory et al 2016). See also the design notes by
+! Griffies et al http://www.met.reading.ac.uk/~jonathan/FAFMIP/GFDL_heat.pdf
+! and the FAFMIP website http://www.met.reading.ac.uk/~jonathan/FAFMIP/
+!
 !</DESCRIPTION>
+!
+! <REFERENCE>
+! Gregory, J. M., Bouttes, N., Griffies, S. M., Haak, H., Hurlin, W. J.,
+! Jungclaus, J., Kelley, M., Lee, W. G., Marshall, J., Romanou, A., Saenko, O.
+! A., Stammer, D., and Winton, M.: The Flux-Anomaly-Forced Model Intercomparison
+! Project (FAFMIP) contribution to CMIP6: investigation of sea-level and ocean
+! climate change in response to CO2 forcing, Geosci. Model Dev., 9, 3993-4017,
+! https://doi.org/10.5194/gmd-9-3993-2016, 2016.
+! </REFERENCE>
 !
 !<NAMELIST NAME="ocean_sbc_nml">
 !
@@ -452,6 +466,38 @@ module ocean_sbc_mod
 !  drift into the interior.  Default read_stokes_drift = .false.
 !  </DATA>
 !
+!  <DATA NAME="do_langmuir" TYPE="logical">
+!  TThis option exists in the event that boundary forcing from a future wave model is
+!  provided. Not to be confused with wave mixing parameterised by supplying 10m
+!  winds.
+!  Default do_langmuir = .false.
+!  </DATA>
+!
+!  <DATA NAME="do_ustar_correction" TYPE="logical">
+!  Compute ustar including the adjusted/correction stress field that has now been
+!  included in smf.
+!  Note, however, that the FAFMIP stess experiment says we should NOT include the perturbed
+!  stress when computing ustar since we do not wish to affect the mixing schemes.
+!  Hence, we should set do_ustar_correction=.false. for FAFMIP in which case ustar just has
+!  contributions from the unperturbed stress.
+!  Default do_ustar_correction = .true. as this reproduces earlier
+!  behavior.
+!  </DATA>
+!
+!  <DATA NAME="do_frazil_redist" TYPE="logical">
+!  In FAFMIP heat experiments we should be using the heat due to frazil
+!  formation from the redistributed tracer. Previous code unconditionally
+!  used the standard tracer. We allow the  user to override the recommended treatment to
+!  recover old results by setting  do_frazil_redist=.false.. If there is no
+!  frazil_redist_tracer this flag has no effect and the usual treatment of frazil proceeds.
+!  This flag has no effect on the ACCESS treatment of frazil which ALWAYS uses the redistibuted
+!  heat  version if it is available.
+!  Note that the current approach (June 2019) the frazil heats are note quite
+!  the same for the temperature and redistributed heat tracers. See the references above 
+!  for details.
+!  Default do_frazil_redist = .true. 
+!  </DATA>
+!
 !</NAMELIST>
 !
 
@@ -475,6 +521,7 @@ use ocean_parameters_mod,     only: grav, rho_cp, cp_ocean, cp_liquid_runoff, cp
 use ocean_parameters_mod,     only: CONSERVATIVE_TEMP, POTENTIAL_TEMP, PREFORMED_SALT, PRACTICAL_SALT
 use ocean_parameters_mod,     only: MOM_BGRID, MOM_CGRID 
 use ocean_riverspread_mod,    only: spread_river_horz
+use ocean_tempsalt_mod,       only: pottemp_from_contemp
 use ocean_tpm_mod,            only: ocean_tpm_sum_sfc, ocean_tpm_avg_sfc, ocean_tpm_sbc
 use ocean_tpm_mod,            only: ocean_tpm_zero_sfc, ocean_tpm_sfc_end
 use ocean_types_mod,          only: ocean_grid_type, ocean_domain_type, ocean_public_type
@@ -524,6 +571,7 @@ integer :: prog_salt_variable =-1
 ! FAFMIP heat tracers 
 integer :: index_added_heat  = -1
 integer :: index_redist_heat = -1
+integer :: index_frazil_redist =-1
 
 integer :: memuse
 integer :: num_prog_tracers
@@ -620,9 +668,13 @@ integer :: id_pme_net        =-1
 integer :: id_ice_mask       =-1
 integer :: id_open_ocean_mask=-1
 integer :: id_restore_mask   =-1
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
 integer :: id_wfimelt        =-1
 integer :: id_wfiform        =-1
+#endif
+#if defined(ACCESS_CM)
+integer :: id_licefw        =-1
+integer :: id_liceht        =-1
 #endif
 
 
@@ -696,9 +748,11 @@ integer :: id_total_ocean_fprec   =-1
 integer :: id_total_ocean_lprec   =-1
 integer :: id_total_ocean_calving =-1
 integer :: id_total_ocean_runoff  =-1
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
 integer :: id_total_ocean_wfimelt =-1
 integer :: id_total_ocean_wfiform =-1
+integer :: id_total_ocean_licefw  =-1
+integer :: id_total_ocean_liceht  =-1
 #endif
 
 
@@ -759,8 +813,9 @@ real, allocatable, dimension(:,:) :: alphasfc2     ! potrho surface thermal expa
 real, allocatable, dimension(:,:) :: betasfc2      ! potrho surface saline contraction coefficient (1/ppt) 
 
 #endif
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
 real, allocatable, dimension(:,:,:) :: sslope
+real, allocatable, dimension(:,:) :: aice
 #endif
 
 
@@ -845,6 +900,8 @@ logical :: use_ideal_runoff               =.false.
 logical :: use_ideal_calving              =.false.
 logical :: read_stokes_drift              =.false.
 logical :: do_langmuir                    =.false.
+logical :: do_ustar_correction            =.true.  ! In FAFMIP stress make this falsel
+logical :: do_frazil_redist               =.true.  ! In FAFMIP heat make this false to recover old (not recommended) behaviour.
 
 real    :: constant_sss_for_restore       = 35.0
 real    :: constant_sst_for_restore       = 12.0
@@ -894,7 +951,8 @@ namelist /ocean_sbc_nml/ temp_restore_tscale, salt_restore_tscale, salt_restore_
          temp_correction_scale, salt_correction_scale, tau_x_correction_scale, tau_y_correction_scale, do_bitwise_exact_sum, &
          sbc_heat_fluxes_const, sbc_heat_fluxes_const_value, sbc_heat_fluxes_const_seasonal,                                 &
          use_constant_sss_for_restore, constant_sss_for_restore, use_constant_sst_for_restore, constant_sst_for_restore,     &
-         use_ideal_calving, use_ideal_runoff, constant_hlf, constant_hlv, read_stokes_drift, do_langmuir
+         use_ideal_calving, use_ideal_runoff, constant_hlf, constant_hlv, read_stokes_drift, do_langmuir,                    &
+         do_ustar_correction, do_frazil_redist
 
 namelist /ocean_sbc_ofam_nml/ restore_mask_ofam, river_temp_ofam
 
@@ -1043,9 +1101,10 @@ subroutine ocean_sbc_init(Grid, Domain, Time, T_prog, T_diag, &
              Ocean_sfc%sea_lev(isc_bnd:iec_bnd,jsc_bnd:jec_bnd), &
              Ocean_sfc%area   (isc_bnd:iec_bnd,jsc_bnd:jec_bnd), &
              Ocean_sfc%frazil (isc_bnd:iec_bnd,jsc_bnd:jec_bnd))
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
   allocate ( Ocean_sfc%gradient (isc_bnd:iec_bnd,jsc_bnd:jec_bnd,2))
   allocate ( sslope(isc:iec, jsc:jec, 2) )
+  allocate ( aice(isc:iec, jsc:jec) )
 #if defined(ACCESS_CM)
   allocate ( Ocean_sfc%co2    (isc_bnd:iec_bnd,jsc_bnd:jec_bnd), &
              Ocean_sfc%co2flux (isc_bnd:iec_bnd,jsc_bnd:jec_bnd)) 
@@ -1059,13 +1118,14 @@ subroutine ocean_sbc_init(Grid, Domain, Time, T_prog, T_diag, &
   Ocean_sfc%sea_lev = 0.0  ! time averaged thickness of top model grid cell (m) plus patm/(grav*rho0)
                            ! minus h_geoid - h_tide 
   Ocean_sfc%frazil  = 0.0  ! time accumulated frazil (J/m^2) passed to ice model
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
   Ocean_sfc%gradient  = 0.0  ! gradint of ssl passed to Ice model
   sslope = 0.0
+  aice = 0.0
+#endif
 #if defined(ACCESS_CM)
   Ocean_sfc%co2       = 0.0 
   Ocean_sfc%co2flux   = 0.0 
-#endif
 #endif
 
   Ocean_sfc%area    = Grid%dat(isc:iec, jsc:jec) * Grid%tmask(isc:iec, jsc:jec, 1) !grid cell area
@@ -1186,6 +1246,7 @@ subroutine ocean_sbc_init(Grid, Domain, Time, T_prog, T_diag, &
    
   do n=1,num_diag_tracers
      if (T_diag(n)%name == 'frazil')   index_frazil    = n
+     if (T_diag(n)%name == 'frazil_redist') index_frazil_redist = n
      if (T_diag(n)%name == 'con_temp') index_diag_temp = n
      if (T_diag(n)%name == 'pot_temp') index_diag_temp = n
   enddo
@@ -1197,6 +1258,10 @@ subroutine ocean_sbc_init(Grid, Domain, Time, T_prog, T_diag, &
   if (index_diag_temp == -1) then 
     call mpp_error(FATAL, &
     '==>Error in ocean_sbc_mod (ocean_sbc_init): diagnostic temp not identified')
+  endif 
+  if (index_frazil_redist > 0 .and. .not. do_frazil_redist) then 
+    write(stdoutunit,*) &
+    '==>Warning: Using standard frazil calculation despite redistributed version being available'
   endif 
   
   if(T_prog(index_temp)%longname=='Conservative temperature') prog_temp_variable = CONSERVATIVE_TEMP
@@ -1805,7 +1870,7 @@ subroutine ocean_sbc_diag_init(Time, Dens, T_prog)
        '(kg/m^3)*(m/sec)', missing_value=missing_value,range=(/-1.e10,1.e10/),                 &
        standard_name='rainfall_flux')   
 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
  id_wfimelt = register_diag_field('ocean_model','wfimelt', Grd%tracer_axes(1:2),  &
        Time%model_time, 'water into ocean due to ice melt (>0 enters ocean)',         &
        '(kg/m^3)*(m/sec)', missing_value=missing_value,range=(/-1.e-1,1.e-1/),&
@@ -1815,6 +1880,18 @@ subroutine ocean_sbc_diag_init(Time, Dens, T_prog)
        Time%model_time, 'water out of ocean due to ice form (>0 enters ocean)',         &
        '(kg/m^3)*(m/sec)', missing_value=missing_value,range=(/-1.e-1,1.e-1/),&
        standard_name='iceform_flux')
+#endif
+
+#if defined(ACCESS_CM)
+  id_licefw = register_diag_field('ocean_model','licefw', Grd%tracer_axes(1:2), &
+        Time%model_time, 'water into ocean due to land ice discharge (>0 enters ocean)', &
+        '(kg/m^2/sec)', missing_value=missing_value,range=(/-1.e10,1.e10/),&
+        standard_name='licefw_flux')
+
+  id_liceht = register_diag_field('ocean_model','liceht', Grd%tracer_axes(1:2), &
+        Time%model_time, 'heat into ocean due to land ice discharge-melt (>0 heats ocean)', &
+        '(W/M^2)', missing_value=missing_value,range=(/-1.e10,1.e10/),&
+        standard_name='liceht_flux')
 #endif
 
   id_swflx = register_diag_field('ocean_model','swflx', Grd%tracer_axes(1:2),  &
@@ -1891,13 +1968,22 @@ subroutine ocean_sbc_diag_init(Time, Dens, T_prog)
        Time%model_time, 'total liquid precip into ocean (>0 enters ocean)',     &
        '(kg/sec)/1e15', missing_value=missing_value,range=(/-1.e10,1.e10/))   
 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
  id_total_ocean_wfimelt = register_diag_field('ocean_model','total_ocean_wfimelt',  &
        Time%model_time, 'total icemelt into ocean (>0 enters ocean)',     &
        'kg/sec/1e15', missing_value=missing_value,range=(/-1.e10,1.e10/))
  id_total_ocean_wfiform = register_diag_field('ocean_model','total_ocean_wfiform',  &
        Time%model_time, 'total iceform outof ocean (>0 enters ocean)',     &
        'kg/sec/1e15', missing_value=missing_value,range=(/-1.e10,1.e10/))
+#endif 
+
+#if defined(ACCESS_CM)
+  id_total_ocean_licefw = register_diag_field('ocean_model','total_ocean_licefw',  &
+        Time%model_time, 'total land icemelt into ocean (>0 enters ocean)',     &
+        'kg/sec/1e15', missing_value=missing_value,range=(/-1.e10,1.e10/))
+  id_total_ocean_liceht = register_diag_field('ocean_model','total_ocean_liceht',  &
+        Time%model_time, 'total land icemelt heat flux into ocean (>0 heats ocean)', &
+        'Watts/1e15', missing_value=missing_value,range=(/-1.e10,1.e10/))
 #endif
 
   id_total_ocean_runoff = register_diag_field('ocean_model','total_ocean_runoff',&
@@ -2680,10 +2766,12 @@ subroutine initialize_ocean_sfc(Time, Thickness, T_prog, T_diag, Velocity, Ocean
 
   if(prog_temp_variable==CONSERVATIVE_TEMP) then
     sst(:,:) = T_diag(index_diag_temp)%field(:,:,1)
+    if(index_redist_heat > 0 ) sst_redist(:,:) = pottemp_from_contemp(T_prog(index_salt)%field(:,:,1,taup1),  &
+                                                                      T_prog(index_redist_heat)%field(:,:,1,taup1))
   else
     sst(:,:) = T_prog(index_temp)%field(:,:,1,taup1)
+    if(index_redist_heat > 0) sst_redist(:,:) = T_prog(index_redist_heat)%field(:,:,1,taup1)
   endif
-  if(index_redist_heat > 0) sst_redist(:,:) = T_prog(index_redist_heat)%field(:,:,1,taup1)
 
   where (Grd%tmask(isc:iec,jsc:jec,1) == 1.0)
       Ocean_sfc%t_surf(isc_bnd:iec_bnd,jsc_bnd:jec_bnd)  = sst(isc:iec,jsc:jec) + kelvin
@@ -2757,7 +2845,7 @@ end subroutine initialize_ocean_sfc
 !  
 subroutine sum_ocean_sfc(Time, Thickness, T_prog, T_diag, Dens, Velocity, Ocean_sfc)
 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
   use ocean_operators_mod, only : GRAD_BAROTROPIC_P 
 #endif
 
@@ -2784,12 +2872,14 @@ subroutine sum_ocean_sfc(Time, Thickness, T_prog, T_diag, Dens, Velocity, Ocean_
 
   if(prog_temp_variable==CONSERVATIVE_TEMP) then
     sst(:,:) = T_diag(index_diag_temp)%field(:,:,1)
+    if(index_redist_heat > 0 ) sst_redist(:,:) = pottemp_from_contemp(T_prog(index_salt)%field(:,:,1,taup1),  &
+                                                                      T_prog(index_redist_heat)%field(:,:,1,taup1))
   else
     sst(:,:) = T_prog(index_temp)%field(:,:,1,taup1)
+    if(index_redist_heat > 0) sst_redist(:,:) = T_prog(index_redist_heat)%field(:,:,1,taup1)
   endif
-  if(index_redist_heat > 0) sst_redist(:,:) = T_prog(index_redist_heat)%field(:,:,1,taup1)
 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
   sslope(:,:,:) = GRAD_BAROTROPIC_P(Thickness%sea_lev(:,:), isc - isd, isc - isd)
   if (isc - isd /= 1) then
     call mpp_error (FATAL, '==>Error from ocean_sbc_mod (sum_ocean_sfc): grad barotropic halos')
@@ -2806,7 +2896,7 @@ subroutine sum_ocean_sfc(Time, Thickness, T_prog, T_diag, Dens, Velocity, Ocean_
             Ocean_sfc%u_surf(i,j)  = Ocean_sfc%u_surf(i,j)  + Velocity%u(ii,jj,1,1,taup1)
             Ocean_sfc%v_surf(i,j)  = Ocean_sfc%v_surf(i,j)  + Velocity%u(ii,jj,1,2,taup1)
             Ocean_sfc%sea_lev(i,j) = Ocean_sfc%sea_lev(i,j) + Thickness%sea_lev(ii,jj)
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
             Ocean_sfc%gradient(i,j,:) = Ocean_sfc%gradient(i,j,:) + sslope(ii,jj,:)  
 #endif
          enddo
@@ -2850,8 +2940,21 @@ subroutine sum_ocean_sfc(Time, Thickness, T_prog, T_diag, Dens, Velocity, Ocean_
 
   endif 
 
+!  In FAFMIP heat experiments we should be using the heat from the redistributed
+!  tracer. Previous code uncontionally used the standard tracer. We allow the
+!  user to override the correct treatment to recover old results.
 
-  if(index_frazil > 0) then 
+  if(index_frazil_redist > 0  .and. do_frazil_redist ) then 
+     do k=1,nk
+        do j = jsc_bnd,jec_bnd
+           do i = isc_bnd,iec_bnd
+              ii = i + i_shift
+              jj = j + j_shift
+              Ocean_sfc%frazil(i,j) = Ocean_sfc%frazil(i,j) + T_diag(index_frazil_redist)%field(ii,jj,k)
+           enddo
+        enddo
+     enddo
+  else if(index_frazil > 0 ) then
      do k=1,nk
         do j = jsc_bnd,jec_bnd
            do i = isc_bnd,iec_bnd
@@ -2892,7 +2995,7 @@ subroutine zero_ocean_sfc(Ocean_sfc)
         Ocean_sfc%v_surf(i,j) = 0.0
         Ocean_sfc%sea_lev(i,j)= 0.0
         Ocean_sfc%frazil(i,j) = 0.0
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
         Ocean_sfc%gradient(i,j,:)= 0.0
 #endif
      enddo
@@ -2969,7 +3072,7 @@ subroutine avg_ocean_sfc(Time, Thickness, T_prog, T_diag, Velocity, Ocean_sfc)
            Ocean_sfc%u_surf(i,j)  = Ocean_sfc%u_surf(i,j)*divid
            Ocean_sfc%v_surf(i,j)  = Ocean_sfc%v_surf(i,j)*divid
            Ocean_sfc%sea_lev(i,j) = Ocean_sfc%sea_lev(i,j)*divid 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
            Ocean_sfc%gradient(i,j,:) = Ocean_sfc%gradient(i,j,:)*divid
 #endif
         endif
@@ -2982,10 +3085,12 @@ subroutine avg_ocean_sfc(Time, Thickness, T_prog, T_diag, Velocity, Ocean_sfc)
 
       if(prog_temp_variable==CONSERVATIVE_TEMP) then
           sst(:,:) = T_diag(index_diag_temp)%field(:,:,1)
+          if(index_redist_heat > 0 ) sst_redist(:,:) = pottemp_from_contemp(T_prog(index_salt)%field(:,:,1,taup1),  &
+                                                                            T_prog(index_redist_heat)%field(:,:,1,taup1))
       else
           sst(:,:) = T_prog(index_temp)%field(:,:,1,taup1)
+          if(index_redist_heat > 0 ) sst_redist(:,:) = T_prog(index_redist_heat)%field(:,:,1,taup1)
       endif
-      if(index_redist_heat > 0 ) sst_redist(:,:) = T_prog(index_redist_heat)%field(:,:,1,taup1)
       
       do j = jsc_bnd,jec_bnd
          do i = isc_bnd,iec_bnd
@@ -3039,7 +3144,7 @@ subroutine avg_ocean_sfc(Time, Thickness, T_prog, T_diag, Velocity, Ocean_sfc)
                 if(Grd%tmask(ii,jj,1) == 1.0) then
                     Ocean_sfc%u_surf(i,j) = Velocity%u(ii,jj,1,1,taup1)
                     Ocean_sfc%v_surf(i,j) = Velocity%u(ii,jj,1,2,taup1)
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
                     Ocean_sfc%gradient(i,j,:) = sslope(i,j,:)
 #endif
                 endif
@@ -3127,18 +3232,9 @@ end subroutine ocean_sfc_end
 ! </DESCRIPTION>
 !
 
-#if defined(ACCESS)
-subroutine get_ocean_sbc(Time, Ice_ocean_boundary, Thickness, Dens, Ext_mode, T_prog, Velocity, &
-                         pme, melt, river, runoff, calving, upme, uriver, swflx, swflx_vis, patm, aice)
-
-  real, dimension(isd:,jsd:),    intent(inout)    :: aice 
-
-#else
-
 subroutine get_ocean_sbc(Time, Ice_ocean_boundary, Thickness, Dens, Ext_mode, T_prog, Velocity, &
                          pme, melt, river, runoff, calving, upme, uriver, swflx, swflx_vis, patm)
 
-#endif
 
   type(ocean_time_type),          intent(in)    :: Time 
   type(ice_ocean_boundary_type),  intent(in)    :: Ice_ocean_boundary
@@ -3172,12 +3268,13 @@ subroutine get_ocean_sbc(Time, Ice_ocean_boundary, Thickness, Dens, Ext_mode, T_
   real    :: tmp_x, tmp_y
   real    :: pme_river_total, var
   real    :: tracer_input
-  real    :: tmp_runoff, tmp_calving 
+  real    :: tmp_runoff, tmp_calving, tmp_pme
   real    :: dayreal, phase 
   real    :: stokes_factor
   integer :: tau, taup1, n, i, j, k, ii, jj
   integer :: day, sec 
   real    :: potrhosfc_inv
+  real    :: active_cells, smftu, smftv
 
   integer :: stdoutunit 
   stdoutunit=stdout() 
@@ -3208,15 +3305,28 @@ subroutine get_ocean_sbc(Time, Ice_ocean_boundary, Thickness, Dens, Ext_mode, T_
      enddo
   enddo
 
+  !------- Get 10m winds --------------------------------
+  do j = jsc_bnd,jec_bnd
+     do i = isc_bnd,iec_bnd
+        ii = i + i_shift
+        jj = j + j_shift
+        Velocity%u10(ii,jj)= Ice_ocean_boundary%wnd(i,j)*Grd%tmask(ii,jj,1) !RASF 10m winds passin ACCESS, Wombat. c.f. MOM6 approach ustar to u10. T-GRID!
+     enddo
+  enddo
+  call mpp_update_domains(Velocity%u10(:,:)  , Dom%domain2d)
+
   !------- Calculate Langmuir turbulence enhancement and stokes drift if do_langmuir is true ------------------------
     if ( do_langmuir ) then 
        do j = jsc_bnd,jec_bnd
           do i = isc_bnd,iec_bnd
              ii = i + i_shift
              jj = j + j_shift
-             Velocity%ustoke(ii,jj) = Ice_ocean_boundary%ustoke(i,j)
-             Velocity%vstoke(ii,jj) = Ice_ocean_boundary%vstoke(i,j)
-             Velocity%wavlen(ii,jj)= Ice_ocean_boundary%wavlen(i,j)
+! until full wave model is implemented Ice_ocean_boundary%ustoke etc not associated 
+             if(associated(Ice_ocean_boundary%ustoke)) then
+                Velocity%ustoke(ii,jj) = Ice_ocean_boundary%ustoke(i,j) 
+                Velocity%vstoke(ii,jj) = Ice_ocean_boundary%vstoke(i,j)
+                Velocity%wavlen(ii,jj)= Ice_ocean_boundary%wavlen(i,j)
+             endif
           enddo
        enddo
     endif
@@ -3313,6 +3423,27 @@ subroutine get_ocean_sbc(Time, Ice_ocean_boundary, Thickness, Dens, Ext_mode, T_
      enddo
   endif 
 
+  ! Calculate surface friction velocity
+    do j=jsc,jec
+        do i=isc,iec
+
+!         ustar is needed on the "T-grid".  It is assumed that masking of 
+!         smf over land was performed inside of the ocean_sbc module. 
+!         smf has units of N/m^2 and so we need rho0r to get ustar in m/s.   
+!         swflx has units W/m^2 so needs 1/rho_cp to get to C*m/s units.
+!         these are proper units for buoyancy fluxes. 
+          active_cells = Grd%umask(i,j,1)   + Grd%umask(i-1,j,1)   &
+                        +Grd%umask(i,j-1,1) + Grd%umask(i-1,j-1,1) + epsln
+          smftu = rho0r*(Velocity%smf_bgrid(i,j,1)   + Velocity%smf_bgrid(i-1,j,1)     &
+                        +Velocity%smf_bgrid(i,j-1,1) + Velocity%smf_bgrid(i-1,j-1,1))  &
+                  /active_cells
+          smftv = rho0r*(Velocity%smf_bgrid(i,j,2)   + Velocity%smf_bgrid(i-1,j,2)    &
+                        +Velocity%smf_bgrid(i,j-1,2) + Velocity%smf_bgrid(i-1,j-1,2)) &
+                   /active_cells
+          Velocity%ustar(i,j) = sqrt( sqrt(smftu**2 + smftv**2) )
+     enddo
+  enddo
+  
 
   !--------stokes drift from surface wave model------------------------------- 
   ! smg: place holder until get code updates to Ice_ocean_boundary.
@@ -3384,50 +3515,40 @@ subroutine get_ocean_sbc(Time, Ice_ocean_boundary, Thickness, Dens, Ext_mode, T_
       ! note sign switch on evaporation(i,j), so that evaporation(i,j) > 0 when 
       ! water enters ocean (as when condensation occurs from fog).  for most regions,
       ! evaporation(i,j) < 0.  
+      do j = jsc_bnd,jec_bnd
+          do i = isc_bnd,iec_bnd
+              ii = i + i_shift
+              jj = j + j_shift
+              pme(ii,jj) = (Ice_ocean_boundary%lprec(i,j) + Ice_ocean_boundary%fprec(i,j) &
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
+                          ! PME is meant to include "melt", in a MOM+SIS configuration it
+                          ! is added by the coupler. We add it here. 
+                          + Ice_ocean_boundary%wfimelt(i,j) & 
+                          + Ice_ocean_boundary%wfiform(i,j) &
+#endif
+#if defined(ACCESS_CM)
+                          ! This term is not present in ACCESS_OM, so "add" it now
+                          + Ice_ocean_boundary%licefw(i,j) &
+#endif
+                          - Ice_ocean_boundary%q_flux(i,j))*Grd%tmask(ii,jj,1) 
+              liquid_precip(ii,jj) =  Ice_ocean_boundary%lprec(i,j)*Grd%tmask(ii,jj,1) 
+              frozen_precip(ii,jj) =  Ice_ocean_boundary%fprec(i,j)*Grd%tmask(ii,jj,1) 
+              evaporation(ii,jj)   = -Ice_ocean_boundary%q_flux(i,j)*Grd%tmask(ii,jj,1) 
+          enddo
+      enddo
       if(waterflux_tavg) then 
-         do j = jsc_bnd,jec_bnd
-            do i = isc_bnd,iec_bnd
-               ii = i + i_shift
-               jj = j + j_shift
-               pme(ii,jj) = 0.5*pme_taum1(ii,jj)
-#if defined(ACCESS)
-               ! PME is meant to include "melt", in a MOM+SIS configuration it
-               ! is added by the coupler. In ACCESS we add it here. Also note
-               ! wfimelt and wfiform are total liquid flux coming from the ice.
-               ! This includes melt, evaporation and precip from/through ice.
-               pme_taum1(ii,jj) = (Ice_ocean_boundary%lprec(i,j) + Ice_ocean_boundary%fprec(i,j) &
-                          + Ice_ocean_boundary%wfimelt(i,j) + Ice_ocean_boundary%wfiform(i,j) &
-                          - Ice_ocean_boundary%q_flux(i,j))*Grd%tmask(ii,jj,1)
-#else
-               pme_taum1(ii,jj) = (Ice_ocean_boundary%lprec(i,j) + Ice_ocean_boundary%fprec(i,j) &
-                                  - Ice_ocean_boundary%q_flux(i,j))*Grd%tmask(ii,jj,1) 
-#endif
-               pme(ii,jj) = pme(ii,jj) + 0.5*pme_taum1(ii,jj)
-               liquid_precip(ii,jj) =  Ice_ocean_boundary%lprec(i,j)*Grd%tmask(ii,jj,1) 
-               frozen_precip(ii,jj) =  Ice_ocean_boundary%fprec(i,j)*Grd%tmask(ii,jj,1) 
-               evaporation(ii,jj)   = -Ice_ocean_boundary%q_flux(i,j)*Grd%tmask(ii,jj,1) 
-            enddo
-         enddo
-      else 
-         do j = jsc_bnd,jec_bnd
-            do i = isc_bnd,iec_bnd
-               ii = i + i_shift
-               jj = j + j_shift
-#if defined(ACCESS)
-               ! PME is meant to include "melt", in a MOM+SIS configuration it
-               ! is added by the coupler. We add it here. 
-               pme(ii,jj) = (Ice_ocean_boundary%lprec(i,j) + Ice_ocean_boundary%fprec(i,j) &
-                          + Ice_ocean_boundary%wfimelt(i,j) + Ice_ocean_boundary%wfiform(i,j) &
-                          - Ice_ocean_boundary%q_flux(i,j))*Grd%tmask(ii,jj,1)
-#else
-               pme(ii,jj) = (Ice_ocean_boundary%lprec(i,j) + Ice_ocean_boundary%fprec(i,j) &
-                            -Ice_ocean_boundary%q_flux(i,j))*Grd%tmask(ii,jj,1) 
-#endif
-               liquid_precip(ii,jj) =  Ice_ocean_boundary%lprec(i,j)*Grd%tmask(ii,jj,1) 
-               frozen_precip(ii,jj) =  Ice_ocean_boundary%fprec(i,j)*Grd%tmask(ii,jj,1) 
-               evaporation(ii,jj)   = -Ice_ocean_boundary%q_flux(i,j)*Grd%tmask(ii,jj,1) 
-            enddo
-         enddo
+        do j = jsc_bnd,jec_bnd
+          do i = isc_bnd,iec_bnd
+              ii = i + i_shift
+              jj = j + j_shift
+              ! Take half the waterflux from the previous timestep and add to half 
+              ! the flux from the current timestep calculated above. Set pme_taum1 
+              ! to calculated pme for this timestep
+              tmp_pme = pme(ii,jj)
+              pme(ii,jj) = 0.5*pme(ii,jj) + 0.5*pme_taum1(ii,jj)
+              pme_taum1(ii,jj) = tmp_pme
+          end do
+        end do
       endif 
 
       ! water flux in (kg/m^3)*(m/s) from liquid runoff and calving land ice  
@@ -3886,8 +4007,9 @@ subroutine get_ocean_sbc(Time, Ice_ocean_boundary, Thickness, Dens, Ext_mode, T_
                jj = j + j_shift
                T_prog(index_salt)%stf(ii,jj) = -Ice_ocean_boundary%salt_flux(i,j)*1000.0     -&
                                                (Ice_ocean_boundary%lprec(i,j)                +&
-#if defined(ACCESS)
-                                                melt(ii, jj)                                 +&
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
+                                               (Ice_ocean_boundary%wfimelt(i,j)              +&
+                                               Ice_ocean_boundary%wfiform(i,j))              +&
 #endif
                                                 Ice_ocean_boundary%fprec(i,j) + river(ii,jj) -&
                                                 Ice_ocean_boundary%q_flux(i,j))*salinity_ref*Grd%tmask(ii,jj,1) 
@@ -3983,8 +4105,11 @@ subroutine get_ocean_sbc(Time, Ice_ocean_boundary, Thickness, Dens, Ext_mode, T_
                                             calving(ii,jj))*latent_heat_fusion(ii,jj)            - &
                                            Ice_ocean_boundary%t_flux(i,j)                        - &
                                            Ice_ocean_boundary%q_flux(i,j)*latent_heat_vapor(ii,jj) &
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
                                            + Ice_ocean_boundary%mh_flux(i,j)  &
+#endif
+#if defined(ACCESS_CM)
+                                           + Ice_ocean_boundary%liceht(i,j) &
 #endif
                                            )/cp_ocean*Grd%tmask(ii,jj,1)
           
@@ -4000,6 +4125,9 @@ subroutine get_ocean_sbc(Time, Ice_ocean_boundary, Thickness, Dens, Ext_mode, T_
           sensible(ii,jj) = -Ice_ocean_boundary%t_flux(i,j)*Grd%tmask(ii,jj,1)
           longwave(ii,jj) =  Ice_ocean_boundary%lw_flux(i,j)*Grd%tmask(ii,jj,1)
           latent(ii,jj)   =  latent_heat_vapor(ii,jj)*evaporation(ii,jj) &
+#if defined(ACCESS_CM)
+          +Ice_ocean_boundary%liceht(ii,jj) &   
+#endif
                             -latent_heat_fusion(ii,jj)*(frozen_precip(ii,jj)+calving(ii,jj))
        enddo
     enddo
@@ -4169,7 +4297,7 @@ subroutine get_ocean_sbc(Time, Ice_ocean_boundary, Thickness, Dens, Ext_mode, T_
                       melt, liquid_precip, frozen_precip, evaporation, sensible, longwave, &
                       latent, swflx, swflx_vis)
 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
   do j = jsc_bnd,jec_bnd
      do i = isc_bnd,iec_bnd
         ii = i + i_shift
@@ -4203,16 +4331,10 @@ end subroutine get_ocean_sbc
 ! </DESCRIPTION>
 !
 
-#if defined(ACCESS)
-
-subroutine flux_adjust(Time, T_diag, Dens, Ext_mode, T_prog, Velocity, river, melt, pme, aice)
-  use auscom_ice_parameters_mod, only : use_ioaice, aice_cutoff
-
-  real, dimension(isd:,jsd:),    intent(in)    :: aice 
-
-#else
-
 subroutine flux_adjust(Time, T_diag, Dens, Ext_mode, T_prog, Velocity, river, melt, pme)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
+
+  use auscom_ice_parameters_mod, only : use_ioaice, aice_cutoff
 
 #endif
 
@@ -4242,6 +4364,14 @@ subroutine flux_adjust(Time, T_diag, Dens, Ext_mode, T_prog, Velocity, river, me
   integer                          :: i, j, k, n, tau, taum1
   logical                          :: used
   logical                          :: ice_present
+  real                             :: active_cells, smftu, smftv
+
+#if defined(ACCESS_CM)
+  ! Changed in CM2. Make parameter to isolate change
+  real, parameter                  :: ice_detection_parameter = 0.054
+#else
+  real, parameter                  :: ice_detection_parameter = 0.0539
+#endif
   
   tau      = Time%tau
   taum1    = Time%taum1  
@@ -4285,8 +4415,8 @@ subroutine flux_adjust(Time, T_diag, Dens, Ext_mode, T_prog, Velocity, river, me
              do i=isc,iec
                 if(Grd%tmask(i,j,1) == 1.0) then 
                     ice_present = T_prog(index_temp)%field(i,j,1,tau) <= &
-                                    -0.0539*T_prog(index_salt)%field(i,j,1,tau)
-#if defined(ACCESS)
+                        -ice_detection_parameter*T_prog(index_salt)%field(i,j,1,tau)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
                     if (use_ioaice) then
                       ice_present = aice(i,j) >= aice_cutoff
                     endif
@@ -4835,6 +4965,33 @@ subroutine flux_adjust(Time, T_diag, Dens, Ext_mode, T_prog, Velocity, river, me
            enddo
         enddo
      endif
+
+  ! Calculate surface friction velocity
+  ! FAFMIP stess experiment says do not do this. Default is .TRUE. See notes for
+  ! ocean_sbc_nml namelist above
+
+     if ( do_ustar_correction ) then
+          do j=jsc,jec
+              do i=isc,iec
+
+!         ustar is needed on the "T-grid".  It is assumed that masking of 
+!         smf over land was performed inside of the ocean_sbc module. 
+!         smf has units of N/m^2 and so we need rho0r to get ustar in m/s.   
+!         swflx has units W/m^2 so needs 1/rho_cp to get to C*m/s units.
+!         these are proper units for buoyancy fluxes. 
+             active_cells = Grd%umask(i,j,1)   + Grd%umask(i-1,j,1)   &
+                        +Grd%umask(i,j-1,1) + Grd%umask(i-1,j-1,1) + epsln
+             smftu = rho0r*(Velocity%smf_bgrid(i,j,1)   + Velocity%smf_bgrid(i-1,j,1)     &
+                        +Velocity%smf_bgrid(i,j-1,1) + Velocity%smf_bgrid(i-1,j-1,1))  &
+                  /active_cells
+             smftv = rho0r*(Velocity%smf_bgrid(i,j,2)   + Velocity%smf_bgrid(i-1,j,2)    &
+                        +Velocity%smf_bgrid(i,j-1,2) + Velocity%smf_bgrid(i-1,j-1,2)) &
+                   /active_cells
+             Velocity%ustar(i,j) = sqrt( sqrt(smftu**2 + smftv**2) )
+           enddo
+        enddo
+     endif
+  
 
   endif
 
@@ -5518,6 +5675,22 @@ subroutine ocean_sbc_diag(Time, Velocity, Thickness, Dens, T_prog, Ice_ocean_bou
       call diagnose_3d_rho(Time, Dens, id_tform_rho_pbl_flux_on_nrho, wrk1)
   endif
 
+#if defined(ACCESS_CM)
+   ! Heat into ocean due to land ice discharge-melt (>0 heats ocean)
+   if (id_liceht > 0) then
+       do j=jsc_bnd,jec_bnd
+          do i=isc_bnd,iec_bnd
+             ii=i+i_shift
+             jj=j+j_shift
+             tmp_flux(ii,jj) = Ice_ocean_boundary%liceht(i,j)
+          enddo
+       enddo
+       used = send_data(id_liceht, tmp_flux(:,:),        &
+              Time%model_time, rmask=Grd%tmask(:,:,1),  &
+              is_in=isc, js_in=jsc, ie_in=iec, je_in=jec)
+   endif
+#endif
+
   !--------salt related diagnostics ------------------------------------
   !
   ! salt flux (kg/(m2*sec)) passed through the coupler 
@@ -5661,7 +5834,7 @@ subroutine ocean_sbc_diag(Time, Velocity, Thickness, Dens, T_prog, Ice_ocean_bou
       call diagnose_3d_rho(Time, Dens, id_mass_precip_on_nrho, wrk1)
   endif
 
-#if defined(ACCESS)
+#if defined(ACCESS_CM) || defined(ACCESS_OM)
   ! waterflux associated with ice melt (kg/(m2*sec))
   if (id_wfimelt > 0) then
       do j=jsc_bnd,jec_bnd
@@ -5714,6 +5887,21 @@ subroutine ocean_sbc_diag(Time, Velocity, Thickness, Dens, T_prog, Ice_ocean_bou
       total_stuff  = mpp_global_sum(Dom%domain2d,wrk1_2d(:,:), NON_BITWISE_EXACT_SUM)
       used = send_data (id_total_ocean_wfiform, total_stuff*1e-15, Time%model_time)
   endif
+#endif
+#if defined(ACCESS_CM)
+   ! waterflux associated with land ice melt into ocean (kg/(m2*sec))
+   if (id_licefw > 0) then
+       do j=jsc_bnd,jec_bnd
+          do i=isc_bnd,iec_bnd
+             ii=i+i_shift
+             jj=j+j_shift
+             tmp_flux(ii,jj) = Ice_ocean_boundary%licefw(i,j)
+          enddo
+       enddo
+       used = send_data(id_licefw, tmp_flux(:,:),        &
+              Time%model_time, rmask=Grd%tmask(:,:,1),  &
+              is_in=isc, js_in=jsc, ie_in=iec, je_in=jec)
+   endif
 #endif
 
 
