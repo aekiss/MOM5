@@ -441,7 +441,7 @@ if (id_vert_pvf > 0)   diagnose_pv = .true.
 if (id_bc_pvf > 0)     diagnose_pv = .true.
 if (id_pvf > 0)        diagnose_pv = .true.
 if (id_ri_balance > 0) diagnose_pv = .true.
-if (id_id_u_dot_grad_vert_pv > 0)    diagnose_pv = .true.
+if (id_u_dot_grad_vert_pv > 0)    diagnose_pv = .true.
 
 
 if(horz_grid == MOM_BGRID) then 
@@ -1318,9 +1318,8 @@ subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
   ! calculate u dot grad vert_pv
   ! by centred q differences multiplied by averaged velocity
   ! NB: this method does not conserve q
-  if(d_u_dot_grad_vert_pv > 0) then
-    ! update halo
-    call mpp_update_domains(wrk5,Dom%domain2d,gridtype=BGRID_NE)
+  if(id_u_dot_grad_vert_pv > 0) then
+    call mpp_update_domains(wrk5,Dom%domain2d)
       do k=1,nk
         do j=jsc,jec
           do i=isc,iec
