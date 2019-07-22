@@ -1323,7 +1323,7 @@ subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
       do k=1,nk
         do j=jsc,jec
           do i=isc,iec
-            wrk6 = (wrk5(i+1,j,k) - wrk5(i-1,j,k)) &
+            wrk6(i,j,k) = (wrk5(i+1,j,k) - wrk5(i-1,j,k)) &
                   /(Grd%dxu(i+1,j)+Grd%dxu(i,j)) &
              *( Velocity%u(i,j,k,1,tau) + &
                 Velocity%u(i-1,j,k,1,tau) + &
