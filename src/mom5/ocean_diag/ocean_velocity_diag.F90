@@ -1328,17 +1328,16 @@ subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
              *( Velocity%u(i,j,k,1,tau) + &
                 Velocity%u(i-1,j,k,1,tau) + &
                 Velocity%u(i,j-1,k,1,tau) + &
-                Velocity%u(i-1,j-1,k,1,tau) ) &
+                Velocity%u(i-1,j-1,k,1,tau) )*0.25 &
               + (wrk5(i,j+1,k) - wrk5(i,j-1,k)) &
                /(Grd%dyu(i,j+1)+Grd%dyu(i,j)) &
              *( Velocity%u(i,j,k,2,tau) + &
                 Velocity%u(i-1,j,k,2,tau) + &
                 Velocity%u(i,j-1,k,2,tau) + &
-                Velocity%u(i-1,j-1,k,2,tau) )
+                Velocity%u(i-1,j-1,k,2,tau) )*0.25
           enddo
         enddo
       enddo
-      wrk6 = 0.25*wrk6
     call diagnose_3d(Time, Grd, id_u_dot_grad_vert_pv, wrk6(:,:,:))
   endif
 
