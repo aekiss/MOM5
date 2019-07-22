@@ -1326,10 +1326,7 @@ subroutine diagnose_potential_vorticity(Time, Velocity, Dens, Adv_vel)
   ! equations.
   ! BUG: UNFINISHED!
   if(id_u_dot_grad_vert_pv > 0) then
-    ! update halo
-    call mpp_update_domains(wrk5,Dom%domain2d,gridtype=BGRID_NE)
-
-    ! horz_advect_tracer_2nd_order(Adv_vel, Tracer%field(:,:,:,tau))
+    call mpp_update_domains(wrk5,Dom%domain2d)
     wrk6(isc:iec,jsc:jec,:) = horz_advect_tracer_2nd_order(Adv_vel, wrk5) &
                             + vert_advect_tracer_2nd_order(Adv_vel, wrk5)
     call diagnose_3d(Time, Grd, id_u_dot_grad_vert_pv, wrk6(:,:,:))
