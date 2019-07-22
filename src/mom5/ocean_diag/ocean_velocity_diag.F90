@@ -1292,28 +1292,6 @@ subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
   endif        
 
 
-  ! calculate u dot grad vert_pv
-  ! by centred q differences multiplied by averaged velocity
-  ! NB: this method does not conserve q
-  ! BUG: UNFINISHED!
-  if(d_u_dot_grad_vert_pv > 0) then
-      do k=1,nk
-         do j=jsc,jec
-            do i=isc,iec
-                n=1 ! TODO: also do n=2 (j component)
-                    (wrk5(i+1,j,k) - wrk5(i-1,j,k))/
-                    (Grd%dxu(i+1,j)+Grd%dxu(i,j))
-                    *
-                *0.25*( Velocity%u(i,j,k,n,tau) + &
-                    Velocity%u(i-1,j,k,n,tau) + &
-                    Velocity%u(i,j-1,k,n,tau) + &
-                    Velocity%u(i-1,j-1,k,n,tau) )
-            enddo
-         enddo
-      enddo
-  endif
-
-
   ! contribution from baroclinicity and total contribution 
   if(id_bc_pvf > 0 .or. id_pvf > 0 .or. id_ri_balance > 0) then
      wrk1(:,:,:) = 0.0 
@@ -1336,6 +1314,34 @@ subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
      if(id_ri_balance > 0) call diagnose_3d(Time, Grd, id_ri_balance, wrk4(:,:,:))
   endif 
 
+
+  ! calculate u dot grad vert_pv
+  ! by centred q differences multiplied by averaged velocity
+  ! NB: this method does not conserve q
+  if(d_u_dot_grad_vert_pv > 0) then
+    ! update halo
+    call mpp_update_domains(wrk5,Dom%domain2d,gridtype=BGRID_NE)
+      do k=1,nk
+        do j=jsc,jec
+          do i=isc,iec
+            wrk6 = (wrk5(i+1,j,k) - wrk5(i-1,j,k)) &
+                  /(Grd%dxu(i+1,j)+Grd%dxu(i,j)) &
+             *( Velocity%u(i,j,k,1,tau) + &
+                Velocity%u(i-1,j,k,1,tau) + &
+                Velocity%u(i,j-1,k,1,tau) + &
+                Velocity%u(i-1,j-1,k,1,tau) ) &
+              + (wrk5(i,j+1,k) - wrk5(i,j-1,k)) &
+               /(Grd%dyu(i,j+1)+Grd%dyu(i,j)) &
+             *( Velocity%u(i,j,k,2,tau) + &
+                Velocity%u(i-1,j,k,2,tau) + &
+                Velocity%u(i,j-1,k,2,tau) + &
+                Velocity%u(i-1,j-1,k,2,tau) )
+          enddo
+        enddo
+      enddo
+      wrk6 = 0.25*wrk6
+    call diagnose_3d(Time, Grd, id_u_dot_grad_vert_pv, wrk6(:,:,:))
+  endif
 
 end subroutine diagnose_potential_vorticity
 ! </SUBROUTINE> NAME="diagnose_potential_vorticity"
