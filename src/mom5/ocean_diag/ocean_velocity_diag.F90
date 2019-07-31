@@ -568,13 +568,14 @@ end subroutine ocean_velocity_diag_init
 ! Call diagnostics related to the velocity. 
 ! </DESCRIPTION>
 !
-subroutine ocean_velocity_diagnostics(Time, Thickness, Dens, Ext_mode, Velocity)
+subroutine ocean_velocity_diagnostics(Time, Thickness, Dens, Ext_mode, Velocity, Adv_vel)
 
   type(ocean_time_type),          intent(in)    :: Time
   type(ocean_thickness_type),     intent(in)    :: Thickness
   type(ocean_density_type),       intent(in)    :: Dens
   type(ocean_external_mode_type), intent(in)    :: Ext_mode
   type(ocean_velocity_type),      intent(inout) :: Velocity
+  type(ocean_adv_vel_type),       intent(in)    :: Adv_vel
 
   type(time_type) :: next_time 
 
@@ -622,7 +623,7 @@ subroutine ocean_velocity_diagnostics(Time, Thickness, Dens, Ext_mode, Velocity)
   call diagnose_kinetic_energy_maps(Time, Thickness, Velocity, Ext_mode)
 
   ! diagnostic potential vorticity and terms 
-  call diagnose_potential_vorticity(Time, Velocity, Dens)
+  call diagnose_potential_vorticity(Time, Thickness, Velocity, Adv_vel, Dens)
   
 end subroutine ocean_velocity_diagnostics
 ! </SUBROUTINE>  NAME="ocean_velocity_diagnostics"
@@ -1234,13 +1235,15 @@ end subroutine compute_vorticity
 !
 ! </DESCRIPTION>
 !
-subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
+subroutine diagnose_potential_vorticity(Time, Thickness, Velocity, Adv_vel, Dens)
 
   type(ocean_time_type),      intent(in)  :: Time
+  type(ocean_thickness_type), intent(in)  :: Thickness
   type(ocean_velocity_type),  intent(in)  :: Velocity
+  type(ocean_adv_vel_type),   intent(in)  :: Adv_vel
   type(ocean_density_type),   intent(in)  :: Dens
 
-  real    :: grav_rho0r_sq 
+  real    :: grav_rho0r_sq
   integer :: i, j, k
   integer :: tau
   
@@ -1315,29 +1318,33 @@ subroutine diagnose_potential_vorticity(Time, Velocity, Dens)
   endif 
 
 
-  ! calculate u dot grad vert_pv
-  ! by centred q differences multiplied by averaged velocity
-  ! NB: this method does not conserve q
+  ! calculate u dot grad vert_pv by centred q differences multiplied by averaged velocity
+  ! NB: this method does not use conservative differencing so won't perfectly conserve advective q flux
   if(id_u_dot_grad_vert_pv > 0) then
-    call mpp_update_domains(wrk5,Dom%domain2d)
-      do k=1,nk
-        do j=jsc,jec
-          do i=isc,iec
-            wrk6(i,j,k) = (wrk5(i+1,j,k) - wrk5(i-1,j,k)) &
-                  /(Grd%dxu(i+1,j)+Grd%dxu(i,j)) &
-             *( Velocity%u(i,j,k,1,tau) + &
-                Velocity%u(i-1,j,k,1,tau) + &
-                Velocity%u(i,j-1,k,1,tau) + &
-                Velocity%u(i-1,j-1,k,1,tau) )*0.25 &
-              + (wrk5(i,j+1,k) - wrk5(i,j-1,k)) &
-               /(Grd%dyu(i,j+1)+Grd%dyu(i,j)) &
-             *( Velocity%u(i,j,k,2,tau) + &
-                Velocity%u(i-1,j,k,2,tau) + &
-                Velocity%u(i,j-1,k,2,tau) + &
-                Velocity%u(i-1,j-1,k,2,tau) )*0.25
-          enddo
+    call mpp_update_domains(wrk5,Dom%domain2d)  ! update vert_pv
+    wrk6(:,:,1)  = 0.0
+    wrk6(:,:,nk) = 0.0
+    do k=2,nk-1
+      do j=jsc,jec
+        do i=isc,iec
+          wrk6(i,j,k) = (wrk5(i+1,j,k) - wrk5(i-1,j,k)) &
+          /((Grd%dxu(i-1,j)+Grd%dxu(i,j) + Grd%dxu(i-1,j-1)+Grd%dxu(i,j-1))*0.5) &
+           *( Velocity%u(i,j,k,1,tau) + &
+              Velocity%u(i-1,j,k,1,tau) + &
+              Velocity%u(i,j-1,k,1,tau) + &
+              Velocity%u(i-1,j-1,k,1,tau) )*0.25 &
+            + (wrk5(i,j+1,k) - wrk5(i,j-1,k)) &
+            /((Grd%dyu(i,j-1)+Grd%dyu(i,j) + Grd%dyu(i-1,j-1)+Grd%dyu(i-1,j))*0.5) &
+           *( Velocity%u(i,j,k,2,tau) + &
+              Velocity%u(i-1,j,k,2,tau) + &
+              Velocity%u(i,j-1,k,2,tau) + &
+              Velocity%u(i-1,j-1,k,2,tau) )*0.25 &
+            + (wrk5(i,j,k-1) - wrk5(i,j,k+1)) & ! centred differences so this is on st_ocean points (same as other terms)
+            /(Thickness%dzwt(i,j,k-1) + Thickness%dzwt(i,j,k)) &
+            *rho0r*Adv_vel%wrho_bt(i,j,k)
         enddo
       enddo
+    enddo
     call diagnose_3d(Time, Grd, id_u_dot_grad_vert_pv, wrk6(:,:,:))
   endif
 
