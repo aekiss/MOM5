@@ -1339,9 +1339,9 @@ subroutine diagnose_potential_vorticity(Time, Thickness, Velocity, Adv_vel, Dens
               Velocity%u(i-1,j,k,2,tau) + &
               Velocity%u(i,j-1,k,2,tau) + &
               Velocity%u(i-1,j-1,k,2,tau) )*0.25 &
-            + (wrk5(i,j,k-1) - wrk5(i,j,k+1)) & ! centred differences so this is on st_ocean points (same as other terms)
+            + (wrk5(i,j,k-1) - wrk5(i,j,k+1)) &
             /(Thickness%dzwt(i,j,k-1) + Thickness%dzwt(i,j,k)) &
-            *rho0r*Adv_vel%wrho_bt(i,j,k)
+            *(Adv_vel%wrho_bt(i,j,k-1) + Adv_vel%wrho_bt(i,j,k))*0.5*rho0r
         enddo
       enddo
     enddo
